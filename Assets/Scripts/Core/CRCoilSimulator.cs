@@ -5,58 +5,79 @@ public enum CRGameState
 {
     Playing,
     Win,
-    Lose
+    Lose, // Out of lives
+    Resetting // Temporary state while showing fail animation before resetting
+}
+
+public enum CRFailReason
+{
+    None,
+    Overshoot,
+    Jam,
+    Stuck
 }
 
 public class CRCoilSimulator
 {
-    private CRLevelData currentLevel;
-    
-    public HashSet<Vector2Int> occupiedCells;
-    public HashSet<Vector2Int> jamPins;
+    public CRLevelData currentLevel;
     
     public Dictionary<string, CRRuntimeCoil> activeCoils;
     public Dictionary<string, CRRuntimeGate> activeGates;
-    public Dictionary<string, Vector2Int> targets;
     
     public CRGameState CurrentState { get; private set; }
+    public CRFailReason LastFailReason { get; private set; }
     
     public void Initialize(CRLevelData levelData)
     {
         currentLevel = levelData;
-        occupiedCells = new HashSet<Vector2Int>();
-        jamPins = new HashSet<Vector2Int>();
         activeCoils = new Dictionary<string, CRRuntimeCoil>();
         activeGates = new Dictionary<string, CRRuntimeGate>();
-        targets = new Dictionary<string, Vector2Int>();
         
         CurrentState = CRGameState.Playing;
+        LastFailReason = CRFailReason.None;
         
-        foreach (var pin in levelData.jamPins)
+        foreach (var coilData in levelData.coils)
         {
-            jamPins.Add(pin.position);
-            occupiedCells.Add(pin.position);
+            activeCoils[coilData.id] = new CRRuntimeCoil(coilData);
         }
         
-        foreach (var coil in levelData.coils)
+        foreach (var gateData in levelData.gates)
         {
-            activeCoils[coil.id] = new CRRuntimeCoil(coil);
-            occupiedCells.Add(coil.position);
-        }
-        
-        foreach (var gate in levelData.gates)
-        {
-            activeGates[gate.id] = new CRRuntimeGate(gate);
-            occupiedCells.Add(gate.position);
-        }
-        
-        foreach (var target in levelData.targets)
-        {
-            targets[target.targetCoilId] = target.position;
+            activeGates[gateData.id] = new CRRuntimeGate(gateData);
         }
     }
+
+    // Creates a deep copy of the simulator state, useful for validator and preview
+    public CRCoilSimulator Clone()
+    {
+        var clone = new CRCoilSimulator();
+        clone.currentLevel = currentLevel;
+        clone.CurrentState = CurrentState;
+        clone.LastFailReason = LastFailReason;
+        
+        clone.activeCoils = new Dictionary<string, CRRuntimeCoil>();
+        foreach (var kvp in activeCoils)
+        {
+            clone.activeCoils[kvp.Key] = new CRRuntimeCoil(kvp.Value.data)
+            {
+                position = kvp.Value.position,
+                reachedTarget = kvp.Value.reachedTarget
+            };
+        }
+        
+        clone.activeGates = new Dictionary<string, CRRuntimeGate>();
+        foreach (var kvp in activeGates)
+        {
+            clone.activeGates[kvp.Key] = new CRRuntimeGate(kvp.Value.data)
+            {
+                isReleased = kvp.Value.isReleased
+            };
+        }
+
+        return clone;
+    }
     
-    public bool TryReleaseGate(string gateId)
+    public bool CanReleaseGate(string gateId)
     {
         if (CurrentState != CRGameState.Playing) return false;
         if (!activeGates.ContainsKey(gateId)) return false;
@@ -64,61 +85,90 @@ public class CRCoilSimulator
         var gate = activeGates[gateId];
         if (gate.isReleased) return false;
         
-        // Release gate
-        gate.isReleased = true;
-        occupiedCells.Remove(gate.position);
-        
-        // Trigger associated coil
-        if (activeCoils.TryGetValue(gate.targetCoilId, out var coil))
+        if (!activeCoils.ContainsKey(gate.data.primaryCoilId)) return false;
+        var primaryCoil = activeCoils[gate.data.primaryCoilId];
+
+        return primaryCoil.position >= gate.data.reachLo && primaryCoil.position <= gate.data.reachHi;
+    }
+
+    public bool TryReleaseGate(string gateId)
+    {
+        if (!CanReleaseGate(gateId)) return false;
+
+        var gate = activeGates[gateId];
+
+        // 1. Resolve effects
+        Dictionary<string, int> newPositions = new Dictionary<string, int>();
+        bool hasOvershoot = false;
+        bool hasJam = false;
+
+        foreach (var effect in gate.data.effects)
         {
-            UnwindCoil(coil);
+            if (!activeCoils.ContainsKey(effect.coilId)) continue;
+            var coil = activeCoils[effect.coilId];
+            
+            int newPos = coil.position + effect.step;
+            newPositions[effect.coilId] = newPos;
+            
+            // Check Overshoot
+            if (newPos < 0 || newPos > coil.data.trackLength)
+            {
+                hasOvershoot = true;
+            }
+            
+            // Check Jam (traveled positions)
+            if (!hasOvershoot) // Optimization: if already overshoot, jam doesn't matter as much, or they happen together
+            {
+                int start = coil.position;
+                int end = newPos;
+                int stepDir = System.Math.Sign(effect.step);
+
+                if (stepDir != 0)
+                {
+                    for (int p = start + stepDir; p != end + stepDir; p += stepDir)
+                    {
+                        if (coil.data.jamPins.Contains(p))
+                        {
+                            hasJam = true;
+                            break;
+                        }
+                    }
+                }
+            }
         }
-        
+
+        // 2. Commit or Fail
+        if (hasOvershoot || hasJam)
+        {
+            // Gate becomes spent even on fail? GDD says "If any effect fails, the level plays the failing move... and then the failure event fires... No positions change on a failing move."
+            // Wait, GDD: "Each Released gate stays spent...". Let's spend it.
+            // Actually: "If any effect fails... no positions change". But is the gate spent? "If every effect passes, all positions are updated and the gate becomes Released (spent)."
+            // So if it fails, it does NOT become Released. But the level resets anyway! So it doesn't matter for the current attempt.
+
+            CurrentState = CRGameState.Resetting;
+            LastFailReason = hasJam ? CRFailReason.Jam : CRFailReason.Overshoot;
+            return true;
+        }
+
+        // Commit
+        gate.isReleased = true;
+        foreach (var kvp in newPositions)
+        {
+            activeCoils[kvp.Key].position = kvp.Value;
+        }
+
         CheckWinLossCondition();
         return true;
     }
 
-    public void UnwindCoil(CRRuntimeCoil coil)
-    {
-        // Unwinds up to its length, stopping at obstacles (occupied cells) or boundaries
-        for (int i = 0; i < coil.data.length; i++)
-        {
-            Vector2Int nextPos = coil.currentHeadPosition + coil.data.unwindDirection;
-            
-            // Check grid bounds
-            if (nextPos.x < 0 || nextPos.x >= currentLevel.gridWidth ||
-                nextPos.y < 0 || nextPos.y >= currentLevel.gridHeight)
-            {
-                break; // Hit boundary
-            }
-            
-            // Check obstacle
-            if (occupiedCells.Contains(nextPos))
-            {
-                break; // Hit obstacle (other coil, gate, jam pin)
-            }
-            
-            coil.unwoundPath.Add(nextPos);
-            coil.currentHeadPosition = nextPos;
-            occupiedCells.Add(nextPos);
-            
-            // Check if it reached its target
-            if (targets.TryGetValue(coil.data.id, out var targetPos) && targetPos == nextPos)
-            {
-                coil.reachedTarget = true;
-                break;
-            }
-        }
-    }
-    
     private void CheckWinLossCondition()
     {
         bool allCoilsReached = true;
         
         foreach (var coil in activeCoils.Values)
         {
-            // If the coil has a target, check if it was reached
-            if (targets.ContainsKey(coil.data.id) && !coil.reachedTarget)
+            coil.reachedTarget = (coil.position == coil.data.targetPosition);
+            if (!coil.reachedTarget)
             {
                 allCoilsReached = false;
             }
@@ -130,45 +180,88 @@ public class CRCoilSimulator
             return;
         }
         
-        // If all gates released and not all targets met, it's a loss
-        bool allGatesReleased = true;
-        foreach (var gate in activeGates.Values)
+        // Check Dead-end (Stuck)
+        // Optimization: For the actual game we need a deep search.
+        // For now, if no sequence can win, it's a dead end.
+        if (IsDeadEnd())
         {
-            if (!gate.isReleased)
+            CurrentState = CRGameState.Resetting;
+            LastFailReason = CRFailReason.Stuck;
+        }
+    }
+
+    // A simple recursive check to see if ANY valid sequence of remaining gates leads to a win
+    private bool IsDeadEnd()
+    {
+        // Simple heuristic for now: if no unreleased gates exist, we are stuck (since we aren't winning)
+        bool hasUnreleased = false;
+        foreach(var g in activeGates.Values) {
+            if(!g.isReleased) { hasUnreleased = true; break; }
+        }
+        if(!hasUnreleased) return true;
+
+        // Full DFS check is required by GDD for Dead-end check.
+        return !CanWinFromCurrentState(this, new HashSet<string>());
+    }
+
+    private static bool CanWinFromCurrentState(CRCoilSimulator sim, HashSet<string> visitedStates)
+    {
+        // State representation for memoization
+        string stateKey = sim.GetStateKey();
+        if (visitedStates.Contains(stateKey)) return false;
+        visitedStates.Add(stateKey);
+
+        bool allWon = true;
+        foreach (var coil in sim.activeCoils.Values)
+        {
+            if (coil.position != coil.data.targetPosition) { allWon = false; break; }
+        }
+        if (allWon) return true;
+
+        foreach (var gate in sim.activeGates.Values)
+        {
+            if (!gate.isReleased && sim.CanReleaseGate(gate.data.id))
             {
-                allGatesReleased = false;
-                break;
+                var nextSim = sim.Clone();
+                nextSim.TryReleaseGate(gate.data.id);
+
+                if (nextSim.CurrentState == CRGameState.Win) return true;
+                if (nextSim.CurrentState == CRGameState.Playing) // Not failed
+                {
+                    if (CanWinFromCurrentState(nextSim, visitedStates)) return true;
+                }
             }
         }
-        
-        if (allGatesReleased && !allCoilsReached)
-        {
-            CurrentState = CRGameState.Lose;
-        }
+
+        return false;
+    }
+
+    private string GetStateKey()
+    {
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        foreach (var c in activeCoils) sb.Append($"{c.Key}:{c.Value.position},");
+        foreach (var g in activeGates) sb.Append(g.Value.isReleased ? "1" : "0");
+        return sb.ToString();
     }
 }
 
 public class CRRuntimeCoil
 {
     public CRCoilData data;
-    public List<Vector2Int> unwoundPath;
-    public Vector2Int currentHeadPosition;
+    public int position;
     public bool reachedTarget;
     
     public CRRuntimeCoil(CRCoilData coilData)
     {
         data = coilData;
-        unwoundPath = new List<Vector2Int> { coilData.position };
-        currentHeadPosition = coilData.position;
-        reachedTarget = false;
+        position = coilData.startPosition;
+        reachedTarget = (position == coilData.targetPosition);
     }
 }
 
 public class CRRuntimeGate
 {
     public CRGateData data;
-    public string targetCoilId => data.targetCoilId;
-    public Vector2Int position => data.position;
     public bool isReleased;
     
     public CRRuntimeGate(CRGateData gateData)

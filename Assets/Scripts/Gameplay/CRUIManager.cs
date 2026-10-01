@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.UI;
+using TMPro;
 
 public class CRUIManager : MonoBehaviour
 {
@@ -7,12 +8,16 @@ public class CRUIManager : MonoBehaviour
 
     [Header("Panels")]
     public GameObject winPanel;
-    public GameObject losePanel;
+    public GameObject woundDownPanel; // Replaces simple LosePanel
     public GameObject pausePanel;
     
-    [Header("Top Bar")]
-    public Text levelText;
-    public Button pauseButton;
+    [Header("HUD Elements")]
+    public TextMeshProUGUI levelText;
+    public TextMeshProUGUI livesText;
+
+    [Header("Fail Messages")]
+    public GameObject failMessageContainer;
+    public TextMeshProUGUI failReasonText;
 
     private void Awake()
     {
@@ -20,38 +25,45 @@ public class CRUIManager : MonoBehaviour
         else Destroy(gameObject);
     }
 
-    private void Start()
-    {
-        if (pauseButton != null)
-        {
-            pauseButton.onClick.AddListener(TogglePause);
-        }
-
-        HideAllPanels();
-    }
-
     public void ShowWinScreen()
     {
         if (winPanel != null) winPanel.SetActive(true);
     }
 
-    public void ShowLoseScreen()
+    public void ShowWoundDownScreen()
     {
-        if (losePanel != null) losePanel.SetActive(true);
+        if (woundDownPanel != null) woundDownPanel.SetActive(true);
     }
 
-    public void TogglePause()
+    public void UpdateLivesDisplay(int lives)
     {
-        if (pausePanel != null)
+        if (livesText != null) livesText.text = $"Lives: {lives}";
+    }
+
+    public void ShowFailMessage(CRFailReason reason)
+    {
+        if (failMessageContainer != null) failMessageContainer.SetActive(true);
+        if (failReasonText != null)
         {
-            pausePanel.SetActive(!pausePanel.activeSelf);
+            switch (reason)
+            {
+                case CRFailReason.Overshoot: failReasonText.text = "OVERSHOOT!"; break;
+                case CRFailReason.Jam: failReasonText.text = "JAMMED!"; break;
+                case CRFailReason.Stuck: failReasonText.text = "STUCK!\nNo winning moves left."; break;
+                default: failReasonText.text = "FAILED!"; break;
+            }
         }
     }
 
-    private void HideAllPanels()
+    public void HideFailMessage()
     {
-        if (winPanel != null) winPanel.SetActive(false);
-        if (losePanel != null) losePanel.SetActive(false);
-        if (pausePanel != null) pausePanel.SetActive(false);
+        if (failMessageContainer != null) failMessageContainer.SetActive(false);
+    }
+
+    // UI Buttons
+    public void OnRetryClicked()
+    {
+        if (woundDownPanel != null) woundDownPanel.SetActive(false);
+        CRGameManager.Instance?.RetryLevel();
     }
 }

@@ -6,124 +6,210 @@ public class CRViewManager : MonoBehaviour
     public static CRViewManager Instance { get; private set; }
 
     [Header("Prefabs")]
+    public GameObject trackPrefab;
     public GameObject coilPrefab;
     public GameObject gatePrefab;
     public GameObject jamPinPrefab;
     public GameObject targetPrefab;
-    public GameObject coilSegmentPrefab; // Used to draw the unwound path
-    
-    [Header("Settings")]
-    public float cellSize = 1.0f; // Visual size of each cell on screen
-    public Vector2 gridOffset;    // To center the grid
+    public GameObject ghostCoilPrefab;
 
-    private Dictionary<string, GameObject> activeGateViews = new Dictionary<string, GameObject>();
-    private Dictionary<string, CRCoilView> activeCoilViews = new Dictionary<string, CRCoilView>();
+    [Header("Layout Settings")]
+    public float stepSize = 1.0f;
+    public float trackSpacingY = -2.0f;
+    public Vector2 startOffset = new Vector2(-4, 4);
+
+    private Dictionary<string, CRCoilView> coilViews = new Dictionary<string, CRCoilView>();
+    private Dictionary<string, CRGateView> gateViews = new Dictionary<string, CRGateView>();
+
+    private GameObject previewContainer;
 
     private void Awake()
     {
-        if (Instance == null)
-            Instance = this;
-        else
-            Destroy(gameObject);
+        if (Instance == null) Instance = this;
+        else Destroy(gameObject);
     }
 
     public void SetupViews(CRCoilSimulator simulator)
     {
-        // Clear previous views (for restart/next level)
-        foreach (Transform child in transform)
-        {
-            Destroy(child.gameObject);
-        }
-        activeGateViews.Clear();
-        activeCoilViews.Clear();
+        ClearViews();
 
-        // Spawn targets
-        foreach (var kvp in simulator.targets)
-        {
-            SpawnPrefabAtPosition(targetPrefab, kvp.Value);
-        }
+        previewContainer = new GameObject("PreviewContainer");
+        previewContainer.transform.SetParent(transform);
 
-        // Spawn Jam Pins
-        foreach (var pos in simulator.jamPins)
+        int trackIndex = 0;
+        foreach (var coilKvp in simulator.activeCoils)
         {
-            SpawnPrefabAtPosition(jamPinPrefab, pos);
-        }
+            var coilId = coilKvp.Key;
+            var coilData = coilKvp.Value.data;
 
-        // Spawn Coils
-        foreach (var kvp in simulator.activeCoils)
-        {
-            string coilId = kvp.Key;
-            CRRuntimeCoil rCoil = kvp.Value;
-            
-            GameObject coilObj = SpawnPrefabAtPosition(coilPrefab, rCoil.data.position);
-            CRCoilView coilView = coilObj.AddComponent<CRCoilView>();
-            coilView.Initialize(rCoil, coilSegmentPrefab, cellSize, gridOffset);
-            activeCoilViews[coilId] = coilView;
+            float baseY = startOffset.y + trackIndex * trackSpacingY;
+
+            // Spawn Track Background (Line)
+            var trackObj = Instantiate(trackPrefab, transform);
+            var lr = trackObj.GetComponent<LineRenderer>();
+            if (lr != null)
+            {
+                lr.SetPosition(0, new Vector3(startOffset.x, baseY, 0));
+                lr.SetPosition(1, new Vector3(startOffset.x + coilData.trackLength * stepSize, baseY, 0));
+            }
+
+            // Spawn Target
+            Vector3 targetPos = new Vector3(startOffset.x + coilData.targetPosition * stepSize, baseY, 0);
+            Instantiate(targetPrefab, targetPos, Quaternion.identity, transform);
+
+            // Spawn Jam Pins
+            foreach (var pinPos in coilData.jamPins)
+            {
+                Vector3 jpPos = new Vector3(startOffset.x + pinPos * stepSize, baseY, 0);
+                Instantiate(jamPinPrefab, jpPos, Quaternion.identity, transform);
+            }
+
+            // Spawn Coil
+            Vector3 startPos = new Vector3(startOffset.x + coilData.startPosition * stepSize, baseY, 0);
+            var coilObj = Instantiate(coilPrefab, startPos, Quaternion.identity, transform);
+            var coilView = coilObj.GetComponent<CRCoilView>();
+            if (coilView == null) coilView = coilObj.AddComponent<CRCoilView>();
+            coilView.Initialize(coilId, coilData.color);
+            coilViews[coilId] = coilView;
+
+            trackIndex++;
         }
 
         // Spawn Gates
-        foreach (var kvp in simulator.activeGates)
+        // We'll place gates visually near their primary coil's reach range
+        int gateIndex = 0;
+        foreach (var gateKvp in simulator.activeGates)
         {
-            string gateId = kvp.Key;
-            CRRuntimeGate rGate = kvp.Value;
-            
-            GameObject gateObj = SpawnPrefabAtPosition(gatePrefab, rGate.position);
-            gateObj.name = "Gate_" + gateId;
-            
-            // Add a collider so we can click it
-            if (gateObj.GetComponent<Collider2D>() == null)
+            var gateId = gateKvp.Key;
+            var gateData = gateKvp.Value.data;
+
+            // Find track index of primary coil to align visually
+            int primaryTrackIdx = 0;
+            int idx = 0;
+            foreach (var c in simulator.activeCoils.Keys)
             {
-                var col = gateObj.AddComponent<BoxCollider2D>();
-                col.size = new Vector2(cellSize, cellSize);
+                if (c == gateData.primaryCoilId) primaryTrackIdx = idx;
+                idx++;
             }
-            
-            activeGateViews[gateId] = gateObj;
+
+            float baseY = startOffset.y + primaryTrackIdx * trackSpacingY;
+
+            // Position gate somewhat below the track, in the middle of its reach window
+            float avgReach = (gateData.reachLo + gateData.reachHi) / 2.0f;
+            Vector3 gatePos = new Vector3(startOffset.x + avgReach * stepSize, baseY - 0.7f, 0);
+
+            // Adjust to avoid overlap if multiple gates on same primary coil (simple layout for mockup)
+            gatePos.x += (gateIndex % 2 == 0 ? 0.2f : -0.2f);
+            gatePos.y -= (gateIndex % 3) * 0.3f;
+
+            var gateObj = Instantiate(gatePrefab, gatePos, Quaternion.identity, transform);
+            var gateView = gateObj.GetComponent<CRGateView>();
+            if (gateView == null) gateView = gateObj.AddComponent<CRGateView>();
+
+            gateView.Initialize(gateId, gateData);
+            gateViews[gateId] = gateView;
+
+            gateIndex++;
         }
+
+        UpdateViews(simulator);
     }
 
     public void UpdateViews(CRCoilSimulator simulator)
     {
-        // Update Gates (remove if released)
-        List<string> gatesToRemove = new List<string>();
-        foreach (var kvp in activeGateViews)
+        // Update Coil positions
+        foreach (var kvp in simulator.activeCoils)
         {
-            string gateId = kvp.Key;
-            if (simulator.activeGates.ContainsKey(gateId) && simulator.activeGates[gateId].isReleased)
+            if (coilViews.TryGetValue(kvp.Key, out var view))
             {
-                Destroy(kvp.Value);
-                gatesToRemove.Add(gateId);
+                int trackIdx = GetTrackIndex(simulator, kvp.Key);
+                float baseY = startOffset.y + trackIdx * trackSpacingY;
+                Vector3 newPos = new Vector3(startOffset.x + kvp.Value.position * stepSize, baseY, 0);
+
+                view.transform.position = newPos; // Or animate
             }
         }
-        
-        foreach (string id in gatesToRemove)
-            activeGateViews.Remove(id);
 
-        // Update Coils (draw segments)
-        foreach (var kvp in activeCoilViews)
+        // Update Gate states (Spent/Chained/Latched)
+        foreach (var kvp in simulator.activeGates)
         {
-            string coilId = kvp.Key;
-            CRCoilView view = kvp.Value;
-            if (simulator.activeCoils.ContainsKey(coilId))
+            if (gateViews.TryGetValue(kvp.Key, out var view))
             {
-                view.UpdateSegments(simulator.activeCoils[coilId]);
+                bool canRelease = simulator.CanReleaseGate(kvp.Key);
+                view.UpdateState(kvp.Value.isReleased, canRelease);
             }
         }
     }
 
-    public Vector3 GridToWorld(Vector2Int gridPos)
+    public void ShowPreview(string gateId)
     {
-        return new Vector3(gridPos.x * cellSize + gridOffset.x, gridPos.y * cellSize + gridOffset.y, 0);
+        ClearPreview();
+
+        var sim = CRGameManager.Instance.simulator;
+        if (!sim.CanReleaseGate(gateId)) return;
+
+        var previewSim = sim.Clone();
+        previewSim.TryReleaseGate(gateId);
+
+        // Create ghost coils
+        foreach (var kvp in previewSim.activeCoils)
+        {
+            int originalPos = sim.activeCoils[kvp.Key].position;
+            int newPos = kvp.Value.position;
+
+            if (originalPos != newPos)
+            {
+                int trackIdx = GetTrackIndex(sim, kvp.Key);
+                float baseY = startOffset.y + trackIdx * trackSpacingY;
+                Vector3 ghostPos = new Vector3(startOffset.x + newPos * stepSize, baseY, 0);
+
+                var ghostObj = Instantiate(ghostCoilPrefab, ghostPos, Quaternion.identity, previewContainer.transform);
+                var sr = ghostObj.GetComponent<SpriteRenderer>();
+                if (sr != null)
+                {
+                    var color = sim.activeCoils[kvp.Key].data.color;
+                    color.a = 0.5f;
+                    sr.color = color;
+                }
+            }
+        }
     }
 
-    private GameObject SpawnPrefabAtPosition(GameObject prefab, Vector2Int gridPos)
+    public void ClearPreview()
     {
-        if (prefab == null)
+        if (previewContainer != null)
         {
-            GameObject empty = new GameObject("EmptyPrefabHolder");
-            empty.transform.position = GridToWorld(gridPos);
-            empty.transform.SetParent(transform);
-            return empty;
+            foreach (Transform child in previewContainer.transform)
+            {
+                Destroy(child.gameObject);
+            }
         }
-        return Instantiate(prefab, GridToWorld(gridPos), Quaternion.identity, transform);
+    }
+
+    public void ClearViews()
+    {
+        foreach (Transform child in transform)
+        {
+            Destroy(child.gameObject);
+        }
+        coilViews.Clear();
+        gateViews.Clear();
+    }
+
+    public CRGateView GetGateView(string gateId)
+    {
+        if (gateViews.TryGetValue(gateId, out var view)) return view;
+        return null;
+    }
+
+    private int GetTrackIndex(CRCoilSimulator sim, string coilId)
+    {
+        int idx = 0;
+        foreach (var c in sim.activeCoils.Keys)
+        {
+            if (c == coilId) return idx;
+            idx++;
+        }
+        return 0;
     }
 }

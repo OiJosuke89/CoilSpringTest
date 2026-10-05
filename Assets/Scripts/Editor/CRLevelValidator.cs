@@ -66,7 +66,7 @@ public class CRLevelValidator
             if (!gate.isReleased && sim.CanReleaseGate(gate.data.id))
             {
                 var nextSim = sim.Clone();
-                if (nextSim.TryReleaseGate(gate.data.id))
+                if (nextSim.TryReleaseGate(gate.data.id, true))
                 {
                     if (BruteForceSimulate(nextSim, gatesUsed + 1, ref minGates))
                     {

@@ -91,7 +91,7 @@ public class CRCoilSimulator
         return primaryCoil.position >= gate.data.reachLo && primaryCoil.position <= gate.data.reachHi;
     }
 
-    public bool TryReleaseGate(string gateId)
+    public bool TryReleaseGate(string gateId, bool skipDeadEndCheck = false)
     {
         if (!CanReleaseGate(gateId)) return false;
 
@@ -157,11 +157,11 @@ public class CRCoilSimulator
             activeCoils[kvp.Key].position = kvp.Value;
         }
 
-        CheckWinLossCondition();
+        CheckWinLossCondition(skipDeadEndCheck);
         return true;
     }
 
-    private void CheckWinLossCondition()
+    private void CheckWinLossCondition(bool skipDeadEndCheck)
     {
         bool allCoilsReached = true;
         
@@ -183,7 +183,7 @@ public class CRCoilSimulator
         // Check Dead-end (Stuck)
         // Optimization: For the actual game we need a deep search.
         // For now, if no sequence can win, it's a dead end.
-        if (IsDeadEnd())
+        if (!skipDeadEndCheck && IsDeadEnd())
         {
             CurrentState = CRGameState.Resetting;
             LastFailReason = CRFailReason.Stuck;
@@ -223,7 +223,7 @@ public class CRCoilSimulator
             if (!gate.isReleased && sim.CanReleaseGate(gate.data.id))
             {
                 var nextSim = sim.Clone();
-                nextSim.TryReleaseGate(gate.data.id);
+                nextSim.TryReleaseGate(gate.data.id, true);
 
                 if (nextSim.CurrentState == CRGameState.Win) return true;
                 if (nextSim.CurrentState == CRGameState.Playing) // Not failed
